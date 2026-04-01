@@ -56,6 +56,27 @@ def get_panel_buttons():
         [Button.inline(f"📊 Status: {status_text}", b"status")]
     ]
 
+@client.on(events.NewMessage(pattern='/update'))
+async def update_bot(event):
+    if event.sender_id != ADMIN_ID:
+        return
+    import subprocess
+    import sys
+    
+    status_msg = await event.reply("🔄 Menarik pembaruan dari GitHub...")
+    try:
+        # Run git pull
+        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
+        await status_msg.edit(f"✅ Repositori berhasil di-pull:\n```\n{result.stdout}\n```\n\nSedang memulai ulang sistem (Restarting)...")
+        
+        # Disconnect client
+        await client.disconnect()
+        
+        # Restart the script
+        os.execl(sys.executable, sys.executable, *sys.argv)
+    except Exception as e:
+        await status_msg.edit(f"❌ Gagal melakukan update: {e}")
+
 @client.on(events.NewMessage(pattern='/panel'))
 async def panel(event):
     if event.chat_id != ADMIN_ID:
