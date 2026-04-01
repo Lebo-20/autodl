@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Local imports
-from api import get_drama_detail, get_all_episodes
+from api import (
+    get_drama_detail, get_all_episodes, get_latest_dramas,
+    get_latest_idramas, get_idrama_detail, get_idrama_all_episodes
+)
 from downloader import download_all_episodes
 from merge import merge_episodes
 from uploader import upload_drama
@@ -148,13 +151,17 @@ async def on_download(event):
     await process_drama_full(book_id, chat_id, status_msg)
     BotState.is_processing = False
 
-async def process_drama_full(book_id, chat_id, status_msg=None):
-    """Refactored logic to be reusable for auto-mode."""
-    detail = await get_drama_detail(book_id)
-    episodes = await get_all_episodes(book_id)
+async def process_drama_full(book_id, chat_id, status_msg=None, source="microdrama"):
+    """Refactored logic to be reusable for auto-mode and support multiple API sources."""
+    if source == "idrama":
+        detail = await get_idrama_detail(book_id)
+        episodes = await get_idrama_all_episodes(book_id)
+    else:
+        detail = await get_drama_detail(book_id)
+        episodes = await get_all_episodes(book_id)
     
     if not detail or not episodes:
-        if status_msg: await status_msg.edit(f"❌ Detail atau Episode `{book_id}` tidak ditemukan.")
+        if status_msg: await status_msg.edit(f"❌ Detail atau Episode `{book_id}` ({source}) tidak ditemukan.")
         return False
 
     title = detail.get("title") or detail.get("bookName") or detail.get("name") or f"Drama_{book_id}"
@@ -205,8 +212,7 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
             shutil.rmtree(temp_dir)
 
 async def auto_mode_loop():
-    """Loop to find and process new dramas automatically."""
-    from api import get_latest_dramas
+    """Loop to find and process new dramas automatically with multiple API fallbacks."""
     global processed_ids
     
     logger.info("🚀 Full Auto-Mode Started.")
@@ -223,10 +229,12 @@ async def auto_mode_loop():
             interval = 5 if is_initial_run else 15 # Check every 15 mins after first run
             logger.info(f"🔍 Scanning for new dramas (Next scan in {interval}m)...")
             
+            # --- SOURCE 1: MicroDrama ---
             # Step 1: Check Latest Discovery Endpoints (latest)
             dramas = await get_latest_dramas(pages=3 if is_initial_run else 1) or []
+            source = "microdrama"
             
-            # Step 2: Check if all dramas are already processed
+            # Step 2: Check if all dramas from API 1 are already processed
             all_processed = True
             if dramas:
                 for d in dramas:
@@ -235,13 +243,26 @@ async def auto_mode_loop():
                         all_processed = False
                         break
             
-            # If nothing new found OR list is empty, try Popular Search Random Fill
+            # --- SOURCE 2: iDrama Fallback ---
+            # If nothing new from API 1, check API 2 (iDrama)
             if not dramas or (all_processed and not is_initial_run):
-                if all_processed and dramas:
-                    logger.info("ℹ️ Latest dramas already uploaded. Fetching Popular Search fallback...")
+                logger.info("🔎 API 1 (MicroDrama) has no new updates. Checking API 2 (iDrama)...")
+                api2_dramas = await get_latest_idramas()
+                
+                # Filter new from API 2
+                api2_new = [d for d in api2_dramas if str(d.get("bookId") or d.get("id") or d.get("bookid", "")) not in processed_ids]
+                if api2_new:
+                    dramas = api2_new
+                    source = "idrama"
+                    all_processed = False
+                    logger.info(f"✨ Found {len(api2_new)} new dramas in API 2 (iDrama)!")
                 else:
-                    logger.info("🔎 No dramas found. Trying Popular Search fallback...")
-                    
+                    logger.info("😴 API 2 (iDrama) also has no new updates.")
+            
+            # --- SOURCE 3: Popular Random Fallback (Filler) ---
+            # If still nothing new found, try Popular Search Random Fill
+            if (not dramas or all_processed) and not is_initial_run:
+                logger.info("ℹ️ Both APIs up to date. Fetching Popular Search fallback...")
                 pop_dramas = await get_latest_dramas(pages=1, types=["populersearch"]) or []
                 if pop_dramas:
                     # Filter only the ones NOT processed yet
@@ -249,13 +270,15 @@ async def auto_mode_loop():
                     if choices:
                         random_drama = random.choice(choices)
                         dramas = [random_drama] # Replace queue with this random one
+                        source = "microdrama" # Popular search comes from MicroDrama
+                        all_processed = False
                         logger.info(f"🎲 Random popular picked: {random_drama.get('title')} ({str(random_drama.get('bookId') or random_drama.get('id'))})")
                     else:
                         logger.info("😴 All popular search dramas are also already processed.")
-                        if all_processed: dramas = [] # Clear if we had only processed ones
+                        if all_processed: dramas = [] # Clear list
                 else:
                     if all_processed: dramas = []
-                
+            
             new_found = 0
             
             for drama in dramas:
@@ -274,16 +297,16 @@ async def auto_mode_loop():
                     
                     new_found += 1
                     title = drama.get("title") or drama.get("bookName") or drama.get("name") or "Unknown"
-                    logger.info(f"✨ Found new drama: {title} ({book_id}). Starting process...")
+                    logger.info(f"✨ Found new drama: {title} ({book_id}) via {source}. Starting process...")
                     
                     # Notify admin
                     try:
-                        await client.send_message(ADMIN_ID, f"🆕 **Auto-System Mendeteksi Drama Baru!**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Memproses download & merge...")
+                        await client.send_message(ADMIN_ID, f"🆕 **Auto-System Mendeteksi Drama Baru!**\n🎬 `[{source.upper()}] {title}`\n🆔 `{book_id}`\n⏳ Memproses download & merge...")
                     except: pass
                     
                     BotState.is_processing = True
                     # Process to target channel
-                    success = await process_drama_full(book_id, AUTO_CHANNEL)
+                    success = await process_drama_full(book_id, AUTO_CHANNEL, source=source)
                     BotState.is_processing = False
                     
                     if success:
