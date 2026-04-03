@@ -150,9 +150,15 @@ async def setup_handlers(c):
             finally:
                 BotState.is_processing = False
 
+    @c.on(events.NewMessage(pattern='/update'))
+    async def update_command_handler(event):
+        if event.chat_id != ADMIN_ID: return
+        status_msg = await event.reply("🔄 **Starting manual update...**\nFetching all categories...")
+        await perform_scan(is_manual=True, status_msg=status_msg)
+
     @c.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
-        await event.reply("Welcome to Dramabox Downloader Bot! 🎉\n\nCommands:\n- `/panel` : Admin Control Panel\n- `/menu` : Browse Categories\n- `/cari {query}` : Search Drama\n- `/download {id}` : Direct Download")
+        await event.reply("Welcome to Dramabox Downloader Bot! 🎉\n\nCommands:\n- `/panel` : Admin Control Panel\n- `/menu` : Browse Categories\n- `/cari {query}` : Search Drama\n- `/update` : Manual content scan\n- `/download {id}` : Direct Download")
 
     @c.on(events.NewMessage(pattern=r'/download (\d+)'))
     async def download_handler(event):
@@ -212,6 +218,68 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
+async def perform_scan(is_manual=False, status_msg=None):
+    """Core scanning logic for all categories."""
+    logger.info("🔍 Scanning sections for new dramas...")
+    if status_msg: await status_msg.edit("🔍 **Full Scan Started...**\nChecking categories...")
+    
+    categories = [
+        (get_latest_dramas, "LATEST"),
+        (get_dubbed_dramas, "DUBBED"),
+        (get_foryou_dramas, "FOR YOU"),
+        (get_homepage_dramas, "HOMEPAGE"),
+        (get_popular_search, "POPULAR")
+    ]
+    
+    total_found = 0
+    for func, cat_name in categories:
+        if not BotState.is_auto_running and not is_manual: break
+        
+        try:
+            items = await func()
+        except Exception as e:
+            logger.error(f"Error fetching {cat_name}: {e}")
+            continue
+            
+        if not items: continue
+        if not isinstance(items, list): items = [items]
+        
+        for item in items:
+            if not BotState.is_auto_running and not is_manual: break
+            
+            bid = str(item.get("bookId") or item.get("id") or "")
+            title = item.get("title") or item.get("bookName") or "Unknown"
+            
+            if not bid: continue
+            
+            # Deduplication using Database
+            if db.is_processed(bid, title):
+                continue
+                
+            total_found += 1
+            logger.info(f"✨ [{cat_name}] New: {title} ({bid})")
+            
+            # Notify Admin
+            try: 
+                await client.send_message(ADMIN_ID, f"🆕 **Detected!**\n🎬 `[{cat_name}] {title}`\n🆔 `{bid}`")
+            except: pass
+            
+            # Process
+            BotState.is_processing = True
+            success = await process_drama_full(bid, AUTO_CHANNEL)
+            BotState.is_processing = False
+            
+            if success:
+                db.mark_processed(bid, title)
+            
+            await asyncio.sleep(15) # Wait between uploads
+            
+    if is_manual and status_msg:
+        if total_found > 0:
+            await status_msg.edit(f"✅ **Update Complete!**\nFound and processed {total_found} new dramas.")
+        else:
+            await status_msg.edit("😴 **Update Complete.**\nNo new dramas found.")
+
 async def auto_mode_loop():
     logger.info("🚀 Auto-Mode Scanner Started.")
     is_initial_run = True
@@ -221,56 +289,7 @@ async def auto_mode_loop():
             continue
         try:
             interval = 5 if is_initial_run else 20
-            logger.info("🔍 Scanning sections for new dramas...")
-            
-            categories = [
-                (get_latest_dramas, "LATEST"),
-                (get_dubbed_dramas, "DUBBED"),
-                (get_foryou_dramas, "FOR YOU"),
-                (get_homepage_dramas, "HOMEPAGE"),
-                (get_popular_search, "POPULAR")
-            ]
-            
-            for func, cat_name in categories:
-                if not BotState.is_auto_running: break
-                
-                try:
-                    items = await func()
-                except:
-                    continue
-                    
-                if not items: continue
-                if not isinstance(items, list): items = [items]
-                
-                for item in items:
-                    if not BotState.is_auto_running: break
-                    
-                    bid = str(item.get("bookId") or item.get("id") or "")
-                    title = item.get("title") or item.get("bookName") or "Unknown"
-                    
-                    if not bid: continue
-                    
-                    # Deduplication using Database
-                    if db.is_processed(bid, title):
-                        continue
-                        
-                    logger.info(f"✨ [{cat_name}] New: {title} ({bid})")
-                    
-                    # Notify Admin
-                    try: 
-                        await client.send_message(ADMIN_ID, f"🆕 **Auto-Detected!**\n🎬 `[{cat_name}] {title}`\n🆔 `{bid}`")
-                    except: pass
-                    
-                    # Process
-                    BotState.is_processing = True
-                    success = await process_drama_full(bid, AUTO_CHANNEL)
-                    BotState.is_processing = False
-                    
-                    if success:
-                        db.mark_processed(bid, title)
-                    
-                    await asyncio.sleep(15) # Wait between uploads
-            
+            await perform_scan()
             is_initial_run = False
             # Wait for next scan
             for _ in range(interval * 60):
