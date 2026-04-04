@@ -65,7 +65,8 @@ async def get_latest_dramas(page=1):
     url = f"{BASE_URL}/latest"
     params = {
         "lang": DEFAULT_LANG,
-        "page": page
+        "page": page,
+        "code": AUTH_CODE
     }
     
     async with httpx.AsyncClient(timeout=30) as client:
@@ -87,7 +88,8 @@ async def get_dubbed_dramas(page=1, classify="terpopuler"):
     params = {
         "classify": classify,
         "page": page,
-        "lang": DEFAULT_LANG
+        "lang": DEFAULT_LANG,
+        "code": AUTH_CODE
     }
     
     async with httpx.AsyncClient(timeout=30) as client:
@@ -106,7 +108,7 @@ async def get_dubbed_dramas(page=1, classify="terpopuler"):
 async def get_foryou_dramas():
     """Fetches dramas from 'For You' section."""
     url = f"{BASE_URL}/foryou"
-    params = {"lang": DEFAULT_LANG}
+    params = {"lang": DEFAULT_LANG, "code": AUTH_CODE}
     
     async with httpx.AsyncClient(timeout=30) as client:
         try:
@@ -116,6 +118,11 @@ async def get_foryou_dramas():
                 if isinstance(data, list): return data
                 if data.get("success") and "data" in data:
                     return data["data"]
+                
+                # Check for error in response text if it's not successful
+                if isinstance(data, dict) and (not data.get("success") or "error" in data):
+                    logger.warning(f"For You API returned error: {data.get('message') or data.get('error')}. Falling back to homepage...")
+                    return await get_homepage_dramas()
             return []
         except Exception as e:
             logger.error(f"Error fetching for-you dramas: {e}")
@@ -124,7 +131,7 @@ async def get_foryou_dramas():
 async def get_popular_search():
     """Fetches popular search dramas."""
     url = f"{BASE_URL}/populersearch"
-    params = {"lang": DEFAULT_LANG}
+    params = {"lang": DEFAULT_LANG, "code": AUTH_CODE}
     
     async with httpx.AsyncClient(timeout=30) as client:
         try:
@@ -144,7 +151,8 @@ async def get_homepage_dramas(page=1):
     url = f"{BASE_URL}/homepage"
     params = {
         "page": page,
-        "lang": DEFAULT_LANG
+        "lang": DEFAULT_LANG,
+        "code": AUTH_CODE
     }
     
     async with httpx.AsyncClient(timeout=30) as client:
@@ -161,6 +169,8 @@ async def get_homepage_dramas(page=1):
                     # Combine common sections
                     for key in ['topList', 'recommendList', 'hotList', 'data']:
                         section = data.get(key, [])
+                        if isinstance(section, dict) and "records" in section:
+                            section = section["records"]
                         if isinstance(section, list):
                             all_home.extend(section)
                 return all_home

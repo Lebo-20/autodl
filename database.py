@@ -62,4 +62,11 @@ class Database:
             logger.error(f"Error marking {drama_id} as processed: {e}")
             return False
 
+    def get_stats(self):
+        """Returns total count and last 5 titles."""
+        with sqlite3.connect(self.db_path) as conn:
+            total = conn.execute("SELECT COUNT(*) FROM processed_dramas").fetchone()[0]
+            latest = conn.execute("SELECT title, created_at FROM processed_dramas ORDER BY created_at DESC LIMIT 5").fetchall()
+            return total, latest
+
 db = Database()

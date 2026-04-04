@@ -150,15 +150,26 @@ async def setup_handlers(c):
             finally:
                 BotState.is_processing = False
 
-    @c.on(events.NewMessage(pattern='/update'))
+    @c.on(events.NewMessage(pattern='/new'))
     async def update_command_handler(event):
         if event.chat_id != ADMIN_ID: return
         status_msg = await event.reply("🔄 **Starting manual update...**\nFetching all categories...")
         await perform_scan(is_manual=True, status_msg=status_msg)
 
+    @c.on(events.NewMessage(pattern='/db'))
+    async def db_handler(event):
+        if event.chat_id != ADMIN_ID: return
+        total, latest = db.get_stats()
+        text = f"📊 **Dramabox Database Statistics**\n\n"
+        text += f"Total Uploaded Titles: `{total}`\n\n"
+        text += "最近 (Latest 5):\n"
+        for i, (title, time) in enumerate(latest):
+            text += f"{i+1}. {title} ({time})\n"
+        await event.reply(text)
+
     @c.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
-        await event.reply("Welcome to Dramabox Downloader Bot! 🎉\n\nCommands:\n- `/panel` : Admin Control Panel\n- `/menu` : Browse Categories\n- `/cari {query}` : Search Drama\n- `/update` : Manual content scan\n- `/download {id}` : Direct Download")
+        await event.reply("Welcome to Dramabox Downloader Bot! 🎉\n\nCommands:\n- `/panel` : Admin Control Panel\n- `/menu` : Browse Categories\n- `/cari {query}` : Search Drama\n- `/new` : Manual content scan\n- `/download {id}` : Direct Download\n- `/db` : View uploaded database")
 
     @c.on(events.NewMessage(pattern=r'/download (\d+)'))
     async def download_handler(event):
@@ -204,7 +215,7 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
             if status_msg: await status_msg.edit(f"❌ Merge Gagal: **{title}**")
             return False
 
-        upload_success = await upload_drama(client, chat_id, title, description, poster, output_video_path)
+        upload_success = await upload_drama(client, chat_id, title, description, poster, output_video_path, max_retries=5)
         if upload_success:
             if status_msg: await status_msg.delete()
             return True
@@ -279,25 +290,30 @@ async def perform_scan(is_manual=False, status_msg=None):
             await status_msg.edit(f"✅ **Update Complete!**\nFound and processed {total_found} new dramas.")
         else:
             await status_msg.edit("😴 **Update Complete.**\nNo new dramas found.")
+    
+    logger.info(f"✨ Scan complete. Found {total_found} new items.")
 
 async def auto_mode_loop():
     logger.info("🚀 Auto-Mode Scanner Started.")
     is_initial_run = True
     while True:
         if not BotState.is_auto_running:
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
             continue
         try:
-            interval = 5 if is_initial_run else 20
+            # Faster interval: 1 min if initial, 3 mins otherwise
+            interval = 1 if is_initial_run else 3
             await perform_scan()
             is_initial_run = False
+            
+            logger.info(f"Waiting {interval} minutes for next scan...")
             # Wait for next scan
             for _ in range(interval * 60):
                 if not BotState.is_auto_running: break
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"Error in auto loop: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 async def start_bot():
     global client

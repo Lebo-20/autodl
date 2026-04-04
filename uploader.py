@@ -18,19 +18,24 @@ async def upload_progress(current, total, event, msg_text="Uploading..."):
 
 async def upload_drama(client: TelegramClient, chat_id: int, 
                        title: str, description: str, 
-                       poster_url: str, video_path: str):
+                       poster_url: str, video_path: str,
+                       max_retries: int = 3):
     """
     Uploads the drama information and merged video to Telegram.
+    Includes retry logic and cleanup if upload fails.
     """
     import subprocess
     import tempfile
+    import httpx
+    
+    poster_msg = None
+    poster_path = None
+    status_msg = None
+    
     try:
-        # 1. Send Poster + Description as PHOTO (not file)
-        caption = f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{description[:500]}..."
+        # 1. Send Poster + Description as PHOTO
+        caption = f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{description[:800]}..."
         
-        # Download poster to temp file first so Telethon sends it as photo
-        import httpx
-        poster_path = None
         try:
             async with httpx.AsyncClient(timeout=30) as http_client:
                 resp = await http_client.get(poster_url)
@@ -41,22 +46,22 @@ async def upload_drama(client: TelegramClient, chat_id: int,
         except Exception as e:
             logger.warning(f"Failed to download poster: {e}")
         
-        # Send as visible photo
-        await client.send_file(
+        # Send as visible photo and keep the message object
+        poster_msg = await client.send_file(
             chat_id,
             poster_path or poster_url,
             caption=caption,
-            parse_mode='md',
-            force_document=False  # Force as PHOTO, not file
+            parse_mode='md'
         )
         
         # Cleanup poster temp file
         if poster_path and os.path.exists(poster_path):
-            os.remove(poster_path)
+            try: os.remove(poster_path)
+            except: pass
         
-        status_msg = await client.send_message(chat_id, "📤 Ekstraksi Thumbnail & Durasi Video...")
+        status_msg = await client.send_message(chat_id, "📤 Analyzing video metadata...")
         
-        # 2. Extract Duration & Dimensions (Fallback directly if fails)
+        # 2. Extract Duration & Dimensions
         duration = 0
         width = 0
         height = 0
@@ -80,35 +85,74 @@ async def upload_drama(client: TelegramClient, chat_id: int,
             logger.warning(f"Failed to generate thumbnail: {e}")
             thumb_path = None
 
-        await status_msg.edit("📤 Sedang mengupload video ke Telegram...")
+        # 4. Upload Video with Retries
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                retry_text = f" (Attempt {attempt+1}/{max_retries})" if attempt > 0 else ""
+                await status_msg.edit(f"📤 Uploading video {retry_text}...")
+                
+                video_attributes = [
+                    DocumentAttributeVideo(
+                        duration=duration,
+                        w=width,
+                        h=height,
+                        supports_streaming=True
+                    )
+                ]
+                
+                await client.send_file(
+                    chat_id,
+                    video_path,
+                    caption=f"🎥 Full Episode: {title}",
+                    thumb=thumb_path,
+                    attributes=video_attributes,
+                    progress_callback=lambda c, t: upload_progress(c, t, status_msg, "Upload Progress:"),
+                    supports_streaming=True
+                )
+                
+                # Success!
+                await status_msg.delete()
+                if thumb_path and os.path.exists(thumb_path):
+                    try: os.remove(thumb_path)
+                    except: pass
+                
+                logger.info(f"Successfully uploaded {title} to Telegram")
+                return True
+                
+            except Exception as e:
+                last_error = e
+                logger.error(f"Upload attempt {attempt+1} failed: {e}")
+                # Wait longer each time
+                wait_time = (attempt + 1) * 30 
+                if attempt < max_retries - 1:
+                    await status_msg.edit(f"⚠️ Upload failed. Retrying in {wait_time}s... ({str(e)[:50]})")
+                    await asyncio.sleep(wait_time)
         
-        from telethon.tl.types import DocumentAttributeVideo
-        video_attributes = [
-            DocumentAttributeVideo(
-                duration=duration,
-                w=width,
-                h=height,
-                supports_streaming=True
-            )
-        ]
-        
-        await client.send_file(
-            chat_id,
-            video_path,
-            caption=f"🎥 Full Episode: {title}",
-            force_document=False, # FORCE IT AS VIDEO STREAM
-            thumb=thumb_path,
-            attributes=video_attributes,
-            progress_callback=lambda c, t: upload_progress(c, t, status_msg, "Upload Video:"),
-            supports_streaming=True
-        )
-        
-        await status_msg.delete()
-        if thumb_path and os.path.exists(thumb_path):
-            os.remove(thumb_path)
-            
-        logger.info(f"Successfully uploaded {title} to Telegram")
-        return True
+        # If we reach here, all retries failed
+        raise last_error
+
     except Exception as e:
-        logger.error(f"Failed to upload to Telegram: {e}")
+        logger.error(f"Final failure in upload_drama: {e}")
+        # CLEANUP: Delete poster/description if video failed
+        if poster_msg:
+            try:
+                await client.delete_messages(chat_id, [poster_msg.id])
+                logger.info(f"Deleted poster message for {title} due to upload failure")
+            except Exception as de:
+                logger.error(f"Failed to delete poster message: {de}")
+        
+        if status_msg:
+            try: await status_msg.delete()
+            except: pass
+            
         return False
+    finally:
+        # Final cleanup of temp files
+        if poster_path and os.path.exists(poster_path):
+            try: os.remove(poster_path)
+            except: pass
+        if thumb_path and os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except: pass
+
